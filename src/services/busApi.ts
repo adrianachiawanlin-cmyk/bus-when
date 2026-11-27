@@ -1,26 +1,35 @@
 import { SINGAPORE_BUS_STOPS } from '../data/singaporeBusStops';
 import type {
+  ApiHealthStatus,
   BusArrivalBoard,
+  BusFeature,
   BusLoad,
   BusOperator,
   BusServiceArrival,
   BusStop,
   BusType,
+  LtaBusArrivalV3Response,
+  LtaNextBusV3,
   NextBusEstimate,
 } from '../types/bus';
 
 /**
- * API-Ready Service Layer
- * -----------------------
- * Currently simulates LTA DataMall `BusArrivalv2` responses client-side.
- * When connecting your backend later, set `API_ENDPOINT` to your proxy URL
- * (e.g., `/api/bus-arrival?BusStopCode=${busStopCode}`) and swap the
- * implementation inside `fetchBusArrivals`.
+ * Serverless API Service Layer
+ * ----------------------------
+ * Calls `/api/busarrival?BusStopCode=XXXXX` (proxied on the server to
+ * `https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival` with
+ * the server-side `AccountKey` header).
+ *
+ * If the server does not yet have `LTA_ACCOUNT_KEY` configured (HTTP 503),
+ * gracefully falls back to local simulated arrivals so the UI stays usable.
  */
 export const API_INTEGRATION_CONFIG = {
-  provider: 'LTA DataMall BusArrivalv2 (Frontend Simulation Mode)',
-  expectedEndpoint: '/api/lta/bus-arrival?BusStopCode={5DigitCode}',
-  refreshIntervalSeconds: 30,
+  provider: 'LTA DataMall v3 (/api/busarrival)',
+  healthEndpoint: '/api/health',
+  expectedEndpoint: '/api/busarrival?BusStopCode={5DigitCode}',
+  upstreamUrl:
+    'https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode=04121',
+  refreshIntervalSeconds: 20,
 };
 
 const OPERATORS: BusOperator[] = ['SBST', 'SMRT', 'TTS', 'GAS'];
@@ -40,6 +49,52 @@ function pickLoad(seed: number, minuteOffset: number): BusLoad {
   return 'SEA';
 }
 
+function normalizeOperator(value?: string): BusOperator {
+  if (value === 'SBST' || value === 'SMRT' || value === 'TTS' || value === 'GAS') {
+    return value;
+  }
+  return 'SBST';
+}
+
+function normalizeLoad(value?: string): BusLoad {
+  if (value === 'SEA' || value === 'SDA' || value === 'LSD') {
+    return value;
+  }
+  return 'SEA';
+}
+
+function normalizeType(value?: string): BusType {
+  if (value === 'SD' || value === 'DD' || value === 'BD') {
+    return value;
+  }
+  return 'SD';
+}
+
+function normalizeFeature(value?: string): BusFeature {
+  return value === 'WAB' ? 'WAB' : '';
+}
+
+function mapLtaSlot(slot?: LtaNextBusV3): NextBusEstimate | null {
+  if (!slot || !slot.EstimatedArrival) return null;
+  return {
+    originCode: slot.OriginCode ?? '',
+    destinationCode: slot.DestinationCode ?? '',
+    estimatedArrival: slot.EstimatedArrival,
+    monitored: typeof slot.Monitored === 'number' ? slot.Monitored : undefined,
+    latitude: slot.Latitude ?? '0',
+    longitude: slot.Longitude ?? '0',
+    visitNumber: slot.VisitNumber ?? '1',
+    load: normalizeLoad(slot.Load),
+    feature: normalizeFeature(slot.Feature),
+    type: normalizeType(slot.Type),
+  };
+}
+
+function resolveStopLabel(code?: string): string | undefined {
+  if (!code) return undefined;
+  return getStopByCode(code)?.description;
+}
+
 function buildEstimate(
   originCode: string,
   destinationCode: string,
@@ -55,6 +110,7 @@ function buildEstimate(
     originCode,
     destinationCode,
     estimatedArrival: new Date(etaMs).toISOString(),
+    monitored: 1,
     latitude: (1.28 + (seed % 140) * 0.001).toFixed(6),
     longitude: (103.78 + (seed % 180) * 0.001).toFixed(6),
     visitNumber,
@@ -68,8 +124,27 @@ function generateCustomStopFallback(busStopCode: string): BusStop {
   const seed = hashCode(busStopCode);
   const regionIndex = seed % 5;
   const regions: BusStop['region'][] = ['Central', 'East', 'West', 'North', 'North-East'];
-  const sampleRoads = ['Bukit Timah Rd', 'Serangoon Rd', 'Upper Thomson Rd', 'Jurong West Ave 1', 'Tampines Ave 4'];
-  const sampleServicePool = ['15', '21', '56', '67', '74', '105', '151', '157', '171', '851', '961', '985'];
+  const sampleRoads = [
+    'Bukit Timah Rd',
+    'Serangoon Rd',
+    'Upper Thomson Rd',
+    'Jurong West Ave 1',
+    'Tampines Ave 4',
+  ];
+  const sampleServicePool = [
+    '15',
+    '21',
+    '56',
+    '67',
+    '74',
+    '105',
+    '151',
+    '157',
+    '171',
+    '851',
+    '961',
+    '985',
+  ];
   const count = 3 + (seed % 3);
 
   const services = Array.from({ length: count }, (_, idx) => {
@@ -96,7 +171,7 @@ function generateCustomStopFallback(busStopCode: string): BusStop {
   return {
     busStopCode,
     roadName: sampleRoads[regionIndex],
-    description: `Bus Stop ${busStopCode} (Simulated Code Lookup)`,
+    description: `Bus Stop ${busStopCode}`,
     region: regions[regionIndex],
     services,
   };
@@ -125,7 +200,6 @@ export function searchBusStops(query: string): BusStop[] {
     if (stop.services.some((s) => s.serviceNo.toLowerCase() === q)) return true;
     return false;
   }).sort((a, b) => {
-    // Exact bus stop code prefix matches first
     const aStarts = a.busStopCode.startsWith(q) ? 0 : 1;
     const bStarts = b.busStopCode.startsWith(q) ? 0 : 1;
     if (aStarts !== bStarts) return aStarts - bStarts;
@@ -133,14 +207,21 @@ export function searchBusStops(query: string): BusStop[] {
   });
 }
 
-export async function fetchBusArrivals(
-  busStopCode: string,
-  refreshCycle = 0
-): Promise<BusArrivalBoard> {
-  const normalized = busStopCode.trim();
-  // Realistic brief network delay so loading skeleton states are crisp and verifiable
-  await new Promise((resolve) => setTimeout(resolve, 180));
+export async function fetchApiHealth(): Promise<ApiHealthStatus | null> {
+  try {
+    const res = await fetch('/api/health', { cache: 'no-store' });
+    if (!res.ok) return null;
+    return (await res.json()) as ApiHealthStatus;
+  } catch {
+    return null;
+  }
+}
 
+function buildSimulatedBoard(
+  normalized: string,
+  refreshCycle: number,
+  upstreamMessage?: string
+): BusArrivalBoard {
   const catalogStop = getStopByCode(normalized);
   const isSimulatedFallback = !catalogStop;
   const stop = catalogStop ?? generateCustomStopFallback(normalized);
@@ -151,13 +232,13 @@ export async function fetchBusArrivals(
   const services: BusServiceArrival[] = stop.services.map((meta, index) => {
     const seed = hashCode(`${normalized}-${meta.serviceNo}-${refreshCycle}`);
     const headway = Math.max(4, meta.headwayMinutes);
-    // Calculate smooth, realistic cyclic arrival offsets that advance naturally over time
     const phase = (seed + minuteBucket) % headway;
     const eta1 = Math.max(0, (headway - phase + index) % headway);
     const eta2 = eta1 + headway + (seed % 3);
     const eta3 = eta2 + headway + ((seed + 1) % 3);
 
-    const secondaryType: BusType = meta.preferredType === 'DD' ? 'SD' : meta.preferredType;
+    const secondaryType: BusType =
+      meta.preferredType === 'DD' ? 'SD' : meta.preferredType;
 
     return {
       serviceNo: meta.serviceNo,
@@ -200,7 +281,6 @@ export async function fetchBusArrivals(
     };
   });
 
-  // Sort numerically (with trailing letter e.g. 972M handled cleanly)
   services.sort((a, b) => {
     const numA = parseInt(a.serviceNo, 10);
     const numB = parseInt(b.serviceNo, 10);
@@ -215,9 +295,108 @@ export async function fetchBusArrivals(
     region: stop.region,
     mrtNearby: stop.mrtNearby,
     fetchedAt: new Date(nowMs).toISOString(),
+    dataSource: 'simulated',
+    upstreamMessage,
     isSimulatedFallback,
     services,
   };
+}
+
+export async function fetchBusArrivals(
+  busStopCode: string,
+  refreshCycle = 0,
+  serviceNo?: string
+): Promise<BusArrivalBoard> {
+  const normalized = busStopCode.trim();
+  const catalogStop = getStopByCode(normalized);
+
+  try {
+    const params = new URLSearchParams({ BusStopCode: normalized });
+    if (serviceNo?.trim()) {
+      params.set('ServiceNo', serviceNo.trim());
+    }
+
+    const response = await fetch(`/api/busarrival?${params.toString()}`, {
+      cache: 'no-store',
+    });
+
+    if (response.ok) {
+      const data = (await response.json()) as LtaBusArrivalV3Response;
+      const nowMs = Date.now();
+
+      const services: BusServiceArrival[] = (data.Services ?? [])
+        .map((srv) => {
+          const nextBus = mapLtaSlot(srv.NextBus);
+          if (!nextBus) return null;
+
+          const meta = catalogStop?.services.find(
+            (m) => m.serviceNo.toLowerCase() === srv.ServiceNo.toLowerCase()
+          );
+
+          const destinationLabel =
+            meta?.destinationName ??
+            resolveStopLabel(nextBus.destinationCode) ??
+            (nextBus.destinationCode ? `Stop ${nextBus.destinationCode}` : 'Terminal');
+
+          const originLabel =
+            meta?.originName ??
+            resolveStopLabel(nextBus.originCode) ??
+            (nextBus.originCode ? `Stop ${nextBus.originCode}` : 'Origin');
+
+          return {
+            serviceNo: srv.ServiceNo,
+            operator: normalizeOperator(srv.Operator),
+            destinationName: destinationLabel,
+            originName: originLabel,
+            firstBus: meta?.firstBus ?? '—',
+            lastBus: meta?.lastBus ?? '—',
+            upcomingStops: meta?.upcomingStops ?? [],
+            nextBus,
+            nextBus2: mapLtaSlot(srv.NextBus2),
+            nextBus3: mapLtaSlot(srv.NextBus3),
+          } satisfies BusServiceArrival;
+        })
+        .filter((item): item is BusServiceArrival => item !== null)
+        .sort((a, b) => {
+          const numA = parseInt(a.serviceNo, 10);
+          const numB = parseInt(b.serviceNo, 10);
+          if (numA !== numB) return numA - numB;
+          return a.serviceNo.localeCompare(b.serviceNo);
+        });
+
+      return {
+        busStopCode: data.BusStopCode || normalized,
+        roadName: catalogStop?.roadName ?? 'Singapore Bus Stop',
+        description: catalogStop?.description ?? `Bus Stop ${normalized}`,
+        region: catalogStop?.region ?? 'Central',
+        mrtNearby: catalogStop?.mrtNearby,
+        fetchedAt: new Date(nowMs).toISOString(),
+        dataSource: 'live',
+        services,
+      };
+    }
+
+    let message = 'LTA DataMall live feed unavailable; showing preview schedule.';
+    try {
+      const errBody = (await response.json()) as { error?: string; message?: string };
+      if (errBody.error === 'LTA_ACCOUNT_KEY_NOT_CONFIGURED') {
+        message =
+          'Server LTA_ACCOUNT_KEY is not set yet. Showing simulated preview data.';
+      } else if (errBody.message) {
+        message = `${errBody.message} Showing simulated preview data.`;
+      }
+    } catch {
+      // Ignore non-JSON error body
+    }
+
+    return buildSimulatedBoard(normalized, refreshCycle, message);
+  } catch {
+    return buildSimulatedBoard(
+      normalized,
+      refreshCycle,
+      'Unable to reach /api/busarrival. Showing simulated preview data.'
+    );
+  }
 }
 
 export function getMinutesRemaining(estimatedArrivalIso: string, nowMs: number): number {

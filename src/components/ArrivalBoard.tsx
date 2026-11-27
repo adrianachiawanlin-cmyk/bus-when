@@ -228,6 +228,8 @@ export function ArrivalBoard({
             <p className="mt-1.5 text-xs text-slate-500 tabular-nums">
               {board.services.length} active services
               <span className="mx-1.5" aria-hidden="true">·</span>
+              <span>{board.dataSource === 'live' ? 'Live LTA v3' : 'Preview data'}</span>
+              <span className="mx-1.5" aria-hidden="true">·</span>
               Updated {secondsSinceFetch === 0 ? 'just now' : `${secondsSinceFetch}s ago`}
               <span className="mx-1.5" aria-hidden="true">·</span>
               Next sync in {secondsUntilRefresh}s
@@ -280,9 +282,10 @@ export function ArrivalBoard({
           </div>
         </div>
 
-        {board.isSimulatedFallback && (
+        {board.dataSource === 'simulated' && (
           <div className="mt-4 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700">
-            Code <span className="font-mono font-semibold">{board.busStopCode}</span> is not in the offline sample directory—displaying simulated arrival estimates until your LTA DataMall API proxy is connected.
+            {board.upstreamMessage ||
+              `Showing simulated arrival estimates for stop ${board.busStopCode}. Add your LTA_ACCOUNT_KEY environment secret on the server to enable live LTA DataMall v3 arrivals.`}
           </div>
         )}
       </div>

@@ -190,8 +190,8 @@ export default function App() {
 
       <footer className="hidden md:block border-t border-slate-200 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between text-xs text-slate-500">
-          <span>NextBus SG · Frontend Arrival Display</span>
-          <span>Simulated LTA DataMall feed · Ready for live API connection</span>
+          <span>NextBus SG · LTA DataMall v3 Arrival Tracker</span>
+          <span>Refreshes every 20 seconds via /api/busarrival</span>
         </div>
       </footer>
 
